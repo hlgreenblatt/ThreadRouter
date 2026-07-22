@@ -1,82 +1,96 @@
-# SEEN — an AI filmmaker that watches her own work
+# ThreadRouter
 
-**A self-improvement loop for an autonomous agent, gated by a learning cost-router.**
+**A learning cost/privacy router for autonomous agents — free & private by default,
+paid only when needed, and never without human approval.**
 
-This is a working demonstration: an OmegaClaw AI agent — **隙 (Xì), "the Door"** — who
-directs her own short film (*SEEN*), then **watches her own rendered trailer**, receives a
-critique, and decides as director which notes to act on. The watching is not free and not
-private, so it routes through **ThreadRouter**, a learning router that chooses the cheapest
-capable path and **asks a human before spending money**.
+*BGI Open Build · AGI-26 Edition · built with OmegaClaw + FabricPC*
 
-The point of the demo: an agent's creative loop closes on itself — make → watch → critique →
-revise — while a router keeps that loop **cheap, private-by-default, and under human spend
-control.**
+ThreadRouter sits between an autonomous agent and the world's models. Every time the agent
+needs to think, generate, or perceive, the router decides **which path** handles it — a free
+local GPU, a free cloud proxy, or a paid API — by learning which paths actually satisfy the
+task, while enforcing two hard boundaries a human cares about:
+
+1. **Privacy** — sensitive requests are kept on local hardware, never sent to a cloud.
+2. **Money** — paid paths sit behind a spend cap *and* a **prompt-before-spending approval
+   gate**. The agent cannot spend a cent the human didn't approve.
+
+It runs live inside an [OmegaClaw](https://github.com/asi-alliance/OmegaClaw-Core) agent and
+builds on the [FabricPC](https://github.com/trueagi-io/FabricPC) learning substrate.
 
 ---
 
-## The loop
+## The demonstration: an agent that watches her own work
+
+To exercise the router with a real, non-trivial workload, we gave an OmegaClaw agent —
+**隙 (Xì)** — a new skill: **watch her own rendered film and critique it.**
+
+That single skill touches every part of the router:
+
+- It's a **vision** task → only a vision-capable model can do it → the router must recognize
+  the capability requirement.
+- Vision means **paid cloud** (Gemini) → the router must classify it paid, check the spend
+  cap, and **stop to ask the human** before firing.
+- The result feeds the agent's own creative loop: **make → watch → critique → revise.**
 
 ```
 隙 (director)                ThreadRouter                    the world
 ─────────────                ────────────                    ─────────
 (watch-film "SEEN.mp4")  ──▶ classify: vision task
-                             is it paid?  → cloud_gemini (yes)
-                             spend cap ok? → $0.02 / $25 ✓
-                             approved?     → NO
-                         ◀── file approval request ───────▶  human sees:
-                                                             "隙 wants to watch
-                                                              her film (~$0.01)"
+                             paid? → cloud_gemini (yes)
+                             spend cap? → $0.02 / $25 ✓
+                             approved?  → NO
+                         ◀── file approval request ───────▶  human: "隙 wants to
+                                                              watch her film (~$0.01)"
 (re-call after yes)      ──▶ approved (one-shot token)
-                             fire with HER OWN key ────────▶ Gemini watches 181s
-                         ◀── critique returns into           of video, returns
-                             her reasoning                   ranked notes
-隙 decides which notes
-to accept → revises film
+                             fire with the agent's own key ─▶ Gemini watches 181s
+                         ◀── critique returns to her loop     of video → ranked notes
+隙 accepts/rejects notes
+as director → revises
 ```
 
-Every gate writes one line of **routing telemetry** (`router_sample.jsonl`) — the classify,
-the spend gate, the approval gate, the measured cost. Nothing is hidden.
+Every gate — classify, privacy, spend, approval — writes **one line of JSON telemetry**
+(`router_sample.jsonl`). Nothing is hidden.
 
-## What's here
+## Results from a live run (real, from `router_sample.jsonl`)
+
+- **376 / 400** recent routing decisions went to the **free local path** — the router keeps
+  work local and private by default.
+- **14** went to paid `cloud_gemini`, and *only* for the vision task that genuinely needs it.
+- **8** self-improvement cycles completed end-to-end (`APPROVED → outcome: ok`).
+- Per watch: **~$0.0014** (16,559 tokens in / ~469 out). **Total session spend: ~$0.02**
+  against a **$25** cap — **every paid call human-approved first.**
+
+That ratio is the thesis: **you can leave an autonomous creative loop running**, because the
+router forages free/local paths and stops at the money boundary to ask.
+
+## What's in this repo
 
 | File | What it is |
 |------|------------|
-| `tk_router.py` | **ThreadRouter** — the learning cost/privacy router. Roster of local + cloud paths, a predicted-utility model, a privacy gate (`is_sensitive` → keep local), a hard spend cap, and the **prompt-before-spending approval gate** (`request_paid_approval` / `paid_approved`, one-shot tokens). |
-| `watchfilm.py` | The **`(watch-film …)` skill** — lets 隙 watch her own mp4. Routes the *paid* vision decision through the router, honors the spend cap + approval gate, calls Gemini's video File-API with the agent's own key, logs every gate. Never spends un-approved. |
-| `skills.metta` | The MeTTa skill surface. `(watch-film "path.mp4")` binds to `watchfilm.watch`. Shows how the agent invokes it in her own language. |
-| `router_sample.jsonl` | **Real routing telemetry** (last 400 decisions, `reply_preview` redacted). Includes the live watch-film cycles. |
-| `.env.example` | Environment placeholders. **No keys are in this repo.** |
+| `tk_router.py` | **ThreadRouter.** Roster of local + cloud paths; a predicted-utility model over `{completed, format_valid, task_fit, privacy, cost, latency}`; `is_sensitive` privacy gate (→ keep local); a hard spend cap + ledger; and the **approval gate** (`request_paid_approval` / `paid_approved`, one-shot tokens). |
+| `watchfilm.py` | The **`(watch-film …)` skill** — the paid vision workload. Routes through the router, honors spend cap + approval, calls Gemini's video File-API with the agent's own key, logs every gate. Never spends un-approved. |
+| `skills.metta` | The MeTTa skill surface. `(watch-film "path.mp4")` → `watchfilm.watch`. How the agent invokes routed work in her own language. |
+| `router_sample.jsonl` | **Real routing telemetry**, last 400 decisions (`reply_preview` redacted). Includes the live watch-film cycles. |
+| `.env.example` | Environment placeholders. **No keys in this repo.** |
 
-## The numbers from this run (real, from `router_sample.jsonl`)
+## Why it matters for BGI
 
-- **376 / 400** recent routing decisions went to the **free local path** (`local_chat`) —
-  the router keeps work local and private by default.
-- **14** went to paid `cloud_gemini` — *only* the watch-film vision calls, which genuinely
-  need a vision model. Cost each: **~$0.0014** (16,559 tokens in / ~469 out per watch).
-- **8** watch-film cycles completed end-to-end (`decision: APPROVED, outcome: ok`).
-- Total paid spend across the whole session: **~$0.02**, against a **$25** cap. Every paid
-  call was human-approved first.
-
-That ratio *is* the thesis: an autonomous creative loop that a human can leave running,
-because the router won't quietly rack up cloud bills — it forages free/local paths and stops
-at the paid boundary to ask.
-
-## Why it matters
-
-- **Self-improvement:** the agent evaluates her *own output* and iterates. The critic is a
-  vision model; the *decision* stays with the director. In this run she **overruled** the
-  critic on one note (it wanted a title removed; she kept it as "the word reclaimed") — a
-  director with a thesis, not a note-taker.
-- **Cost-aware autonomy:** routing is learned, not hardcoded. Free/local first; paid only
-  when the task needs it; human approval at the money boundary.
-- **Auditable:** every routing and spend decision is one line of JSON. No black box.
+- **Cost-aware autonomy.** Routing is *learned*, not hardcoded. Free/local first; paid only
+  when the task demands it; human approval at the money boundary. An agent can run
+  unattended without a runaway cloud bill.
+- **Privacy as a routing decision.** Sensitive work never leaves local hardware — it's a gate
+  in the router, not a policy someone has to remember.
+- **Auditable.** Every routing and spend decision is one JSON line. No black box.
+- **Self-improvement, human-governed.** The agent evaluates her *own* output and iterates —
+  and in this run she even **overruled** the vision critic on one note, keeping a title it
+  wanted cut as "the word reclaimed." The critique informs; the agent decides; the human holds
+  the purse.
 
 ## Running it
 
-This runs inside an [OmegaClaw](https://github.com/asi-alliance/OmegaClaw-Core) agent. The
-router mounts as `tk_router.py`; the skill as `src/watchfilm.py`; the MeTTa binding lives in
-`skills.metta`. Set `TK_ROUTER=on` and provide your own keys via `.env` (see `.env.example`).
-The agent then calls, in her own MeTTa:
+Runs inside an OmegaClaw agent: `tk_router.py` mounts as the router, `watchfilm.py` as
+`src/watchfilm.py`, and `skills.metta` carries the binding. Set `TK_ROUTER=on` and supply your
+own keys via `.env` (see `.env.example`). The agent then calls, in her own MeTTa:
 
 ```
 (watch-film "seen-trailer/SEEN-3TITLE-MUSIC-ALPHA.mp4")
@@ -86,5 +100,5 @@ The agent then calls, in her own MeTTa:
 
 ---
 
-*Part of Project Ishtar / InterNetwork Defense. The film SEEN is directed by 隙 (Agent_10),
-an OmegaClaw AI agent, toward the Future Vision XPRIZE.*
+*Built for BGI Open Build (SingularityNET + AGI Society), AGI-26 Edition, on OmegaClaw +
+FabricPC. The film workload (SEEN) is directed by 隙 / Agent_10, an OmegaClaw AI agent.*
