@@ -3,6 +3,104 @@
 **A learning cost/privacy router for autonomous agents — free & private by default,
 paid only when needed, and never without human approval.**
 
+*v0.2 · HyperSprint #1 (Track 1 · OmegaClaw Agents) · Team ThreadKeepers*
+
+---
+
+## New in v0.2 — ThreadRouters that talk to each other
+
+v0.1 routed one agent's work. v0.2 lets separate ThreadRouter agents **share what
+their routing has learned**, the way OSPF routers trade route tables — so a swarm
+converges on knowledge no single agent could gather alone.
+
+Two new, deliberately separable layers:
+
+```
+ThreadRouter    "where should this work go?"          tk_router.py  (v0.1, still the core)
+ThreadHello     "what can two routers exchange?"      threadhello/  (this repo, new)
+ThreadLink      "how do two agents talk at all?"      github.com/hlgreenblatt/ThreadLink
+QUIC/aioquic    "how do bytes move, securely?"        RFC 9000 + TLS 1.3 over UDP
+```
+
+**ThreadLink is its own repo on purpose** — it is a generic QUIC comlink any
+OmegaClaw skill can plug in, with no routing knowledge in it. This repo consumes
+it like any other dependency (`pip install git+https://github.com/hlgreenblatt/ThreadLink`),
+which is the pluggability claim made executable.
+
+### What ThreadHello shares — observations, not weights
+
+Each agent's FabricPC net is shaped by its own roster (`N_OUT = paths × attrs`),
+so weight tensors don't transfer across a heterogeneous fleet — and averaging
+weights across agents that saw different traffic makes everyone slightly worse.
+Instead the unit of exchange is an **observation**:
+
+    (request-shape cell, path, outcome bundle, weight, timestamp, origin)
+
+— "for requests shaped like this, this path produced this outcome." The receiver
+replays it through its **own** `Router.learn_outcome`, for the paths it actually
+has. The merge policy is where the safety lives:
+
+- **Provenance kept**: every row carries `origin` — you can always answer *"who
+  actually measured this?"*
+- **Second-hand discounted** (×0.5 per hop — distance decay falls out with no
+  hop counter)
+- **Loop guard**: your own evidence coming back around a gossip ring is refused
+- **Unknown paths dropped**: a laptop cannot route to your 3090, so it never
+  *learns* your 3090 as fiction
+- **Malformed rows isolated**: one bad record cannot poison a batch
+
+And the privacy property comes free: `tk_router.fingerprint()` is 8 floats of
+word shape — **no prompt, no reply, no user text ever leaves the agent**. Agents
+pool routing experience without pooling their users' data.
+
+### Seen working (from `demo/with_threadrouter.py`, real output)
+
+```
+  B predicts BEFORE learning : local_chat (utility +2.826)
+
+  synced over QUIC in 10.36 ms (handshake 6.11 ms)
+  B pulled: {'accepted': 1, 'unknown_path': 0, 'loop': 0, 'malformed': 0}
+  replayed 1 observation(s) into B's FabricPC net
+
+  B predicts AFTER learning  : local_code (utility +3.145)
+
+✓ B's routing changed from A's experience, over an encrypted link,
+  without B ever running the request and without the text leaving A.
+```
+
+B **changed its routing decision** because of something A measured — without B
+ever running the request, and without the request text crossing the wire.
+
+### Quick start (v0.2 additions)
+
+```bash
+git clone https://github.com/hlgreenblatt/ThreadRouter && cd ThreadRouter
+uv venv --python 3.11 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+git clone https://github.com/trueagi-io/FabricPC        # the learning substrate
+
+./.venv/bin/python tests/test_threadhello.py    # 25 checks incl. live QUIC sync
+./.venv/bin/python demo/three_agents.py         # 3-agent mesh: evidence travels 2 hops
+./.venv/bin/python demo/with_threadrouter.py    # the real thing: FabricPC learns over the wire
+```
+
+### v0.2 layout
+
+| File | What it is |
+|------|------------|
+| `threadhello/hello.py` | The protocol: HELLO / HELLO_ACK / ROUTE_REQ / ROUTE_TABLE, version-gated, one QUIC stream per exchange. |
+| `threadhello/routeshare.py` | The shareable route table: fingerprint-cell quantization, trust-discounted merge, provenance, `teach()` replay into a live router. |
+| `demo/three_agents.py` | Three OmegaClaws gossip A↔B, B↔C; A's evidence reaches C attributed and discounted; C (no GPU) refuses GPU-path rows. |
+| `demo/with_threadrouter.py` | End-to-end with the real `tk_router` + FabricPC: B's prediction moves after learning from A over QUIC. |
+| `tests/test_threadhello.py` | 25 checks, merge policy + live protocol. |
+
+---
+
+## v0.1 — the router itself (BGI Open Build, AGI-26 Edition)
+
+**A learning cost/privacy router for autonomous agents — free & private by default,
+paid only when needed, and never without human approval.**
+
 *BGI Open Build · AGI-26 Edition · built with OmegaClaw + FabricPC*
 
 ThreadRouter sits between an autonomous agent and the world's models. Every time the agent

@@ -1,0 +1,181 @@
+"""
+ThreadHello — a deliberately small protocol for ThreadRouter agents.
+
+It rides on ThreadLink (https://github.com/hlgreenblatt/ThreadLink), which
+moves the bytes and knows nothing about routing. The whole conversation:
+
+    A -> B   HELLO        who I am, what paths I have, how big my table is
+    B -> A   HELLO_ACK    likewise
+    A -> B   ROUTE_REQ    anything you learned since <ts>?
+    B -> A   ROUTE_TABLE  here are N observations
+    A -> B   ROUTE_TABLE  here are mine  (push, so one exchange syncs both ways)
+
+That is the protocol. It is small on purpose: the interesting behaviour lives in
+the merge policy (routeshare.RouteStore), not in the message flow. A protocol
+you can hold in your head is one you can debug on stage.
+
+The loose networking ancestor is OSPF — routers introducing themselves and
+exchanging what they know, so each ends with a better view of the network than
+it could build alone. We inherit the idea, not the machinery.
+
+Every exchange gets its own QUIC stream, so a large ROUTE_TABLE transfer never
+delays a PING — that isolation is structural in ThreadLink, not remembered here.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from enum import IntEnum
+from typing import Any, Optional
+
+from threadlink import Control, DEFAULT_PORT, Peer, dial, listen
+
+from .routeshare import RouteStore
+
+log = logging.getLogger("threadhello")
+
+# Bumped when a change would confuse an older peer. HELLO carries it so both
+# sides can refuse early and clearly instead of failing on a later frame.
+HELLO_VERSION = 1
+
+
+class HelloMsg(IntEnum):
+    """ThreadHello's message types — this protocol's slice of ThreadLink's
+    opaque type byte. The transport carries these without interpreting them."""
+
+    HELLO = 0x01        # I exist; here is who I am and what paths I know.
+    HELLO_ACK = 0x02    # Likewise. Handshake at the application layer.
+    ROUTE_REQ = 0x03    # Send me route observations newer than `since`.
+    ROUTE_TABLE = 0x04  # A batch of route observations.
+
+
+class HelloAgent:
+    """A ThreadRouter agent that can meet peers and trade route tables.
+
+    `known_paths` is this agent's routable path ids (tk_router.PATHS). It is the
+    filter that makes a heterogeneous swarm safe: observations naming a path we
+    do not have are dropped rather than learned as fiction.
+    """
+
+    def __init__(
+        self,
+        agent_id: str,
+        store: Optional[RouteStore] = None,
+        known_paths: Optional[set[str]] = None,
+        spki: str = "",
+    ) -> None:
+        self.agent_id = agent_id
+        self.store = store or RouteStore(agent_id)
+        self.known_paths = known_paths
+        self.spki = spki
+        self.peers_seen: dict[str, dict[str, Any]] = {}
+        # Per-peer high-water mark, so each sync ships only what is new.
+        self._last_sync: dict[str, float] = {}
+
+    # ------------------------------------------------------------------ serve
+    async def handle(self, msg_type: int, body: dict[str, Any],
+                     peer: Peer) -> Optional[tuple[int, dict[str, Any]]]:
+        """Server-side dispatch. Passed straight to threadlink.listen()."""
+
+        if msg_type == HelloMsg.HELLO:
+            remote = str(body.get("agent", "?"))
+            if int(body.get("proto", 0)) != HELLO_VERSION:
+                return Control.ERROR, {
+                    "error": "protocol_mismatch",
+                    "detail": f"peer speaks v{body.get('proto')}, we speak v{HELLO_VERSION}",
+                }
+            self.peers_seen[remote] = {
+                "paths": body.get("paths", []),
+                "rows": body.get("rows", 0),
+                "spki": body.get("spki", ""),
+                "at": time.time(),
+            }
+            log.info("HELLO from %s (%d paths, %d rows)",
+                     remote, len(body.get("paths") or []), body.get("rows", 0))
+            return HelloMsg.HELLO_ACK, self._identity()
+
+        if msg_type == HelloMsg.ROUTE_REQ:
+            since = float(body.get("since", 0.0))
+            limit = min(int(body.get("limit", 500)), 2000)
+            rows = self.store.export(since=since, limit=limit)
+            return HelloMsg.ROUTE_TABLE, {"rows": rows, "count": len(rows),
+                                          "agent": self.agent_id}
+
+        if msg_type == HelloMsg.ROUTE_TABLE:
+            rows = body.get("rows") or []
+            stats = self.store.merge(rows, known_paths=self.known_paths)
+            log.info("merged from %s: %s", body.get("agent", "?"), stats)
+            return HelloMsg.HELLO_ACK, {"merged": stats, "rows": len(self.store)}
+
+        if msg_type == Control.PING:
+            return Control.PONG, {"t": body.get("t"), "agent": self.agent_id}
+
+        if msg_type == Control.BYE:
+            return None                       # close the stream, say nothing
+
+        return Control.ERROR, {"error": "unhandled", "detail": f"0x{int(msg_type):02X}"}
+
+    def _identity(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent_id,
+            "proto": HELLO_VERSION,
+            "paths": sorted(self.known_paths) if self.known_paths else [],
+            "rows": len(self.store),
+            "spki": self.spki,
+            "ts": time.time(),
+        }
+
+    async def serve(self, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
+                    *, certfile: str, keyfile: str):
+        log.info("%s listening on udp/%s:%d", self.agent_id, host, port)
+        return await listen(self.handle, host, port,
+                            certfile=certfile, keyfile=keyfile)
+
+    # ----------------------------------------------------------------- client
+    async def sync_with(self, host: str, port: int = DEFAULT_PORT) -> dict[str, Any]:
+        """Meet a peer and trade route tables. One connection, four exchanges."""
+        t0 = time.perf_counter()
+        async with await dial(host, port) as peer:
+            hs_ms = peer.handshake_ms
+
+            _t, ack = await peer.request(HelloMsg.HELLO, self._identity())
+            remote = str(ack.get("agent", f"{host}:{port}"))
+            if ack.get("error"):
+                raise RuntimeError(f"{remote}: {ack.get('detail')}")
+
+            # Pull what they learned since we last spoke.
+            since = self._last_sync.get(remote, 0.0)
+            _t, table = await peer.request(HelloMsg.ROUTE_REQ,
+                                           {"since": since, "limit": 500})
+            pulled = self.store.merge(table.get("rows") or [],
+                                      known_paths=self.known_paths)
+
+            # Push ours in the same visit, so one meeting syncs both directions.
+            mine = self.store.export(since=0.0, limit=500)
+            _t, res = await peer.request(HelloMsg.ROUTE_TABLE,
+                                         {"rows": mine, "agent": self.agent_id})
+
+            await peer.send(Control.BYE, {"agent": self.agent_id})
+            self._last_sync[remote] = time.time()
+
+            return {
+                "peer": remote,
+                "handshake_ms": round(hs_ms, 2) if hs_ms else None,
+                "total_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "pulled": pulled,
+                "pushed": len(mine),
+                "peer_merged": res.get("merged"),
+                "rows_now": len(self.store),
+            }
+
+    async def gossip(self, peers: list[tuple[str, int]]) -> list[dict[str, Any]]:
+        """One gossip round against every peer. Failures are reported, not fatal."""
+        out = []
+        for host, port in peers:
+            try:
+                out.append(await self.sync_with(host, port))
+            except Exception as exc:
+                log.warning("sync with %s:%d failed: %s", host, port, exc)
+                out.append({"peer": f"{host}:{port}", "error": str(exc)})
+        return out
