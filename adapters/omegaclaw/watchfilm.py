@@ -30,12 +30,18 @@ Patterned on hailuo.py (submit->poll->return) — self-contained, stdlib + reque
 
 import json
 import os
+import sys
 import time
 
 try:
     import requests
 except Exception:  # pragma: no cover
     requests = None
+
+# Deployed, this file sits next to tk_router.py inside the agent (src/).
+# In the repo it lives in adapters/omegaclaw/, so put the repo root (where
+# tk_router.py lives) on the path too.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
     import tk_router as _tk

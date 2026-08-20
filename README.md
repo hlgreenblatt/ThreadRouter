@@ -5,6 +5,36 @@ paid only when needed, and never without human approval.**
 
 *v0.2 · HyperSprint #1 (Track 1 · OmegaClaw Agents) · Team ThreadKeepers*
 
+> **ThreadRouter is not an OmegaClaw modification. It is an open agent-routing
+> toolkit. OmegaClaw is its first integration.**
+
+Nothing in the toolkit requires forking or patching a host framework. A host
+plugs in through a thin adapter (see `adapters/`), and the layers underneath
+are each independently reusable:
+
+```
+                 ThreadRouter
+            routing / learning toolkit
+                      |
+            +---------+---------+
+            |         |         |
+        OmegaClaw  OpenClaw   Hermes        <- thin adapters, one per host
+         adapter   (planned)  (planned)        (adapters/omegaclaw/ today)
+                      |
+                 ThreadHello
+             route-learning exchange
+                      |
+                 ThreadLink
+          generic agent communications
+                      |
+             QUIC  (TCP fallback planned)
+```
+
+Honest scope note: the core still carries some OmegaClaw-era assumptions;
+making it fully framework-neutral is the named next refactor. The adapter
+boundary and the repo split are real today — `threadhello/` and every test run
+without any host framework present.
+
 ---
 
 ## New in v0.2 — ThreadRouters that talk to each other
@@ -166,8 +196,8 @@ router forages free/local paths and stops at the money boundary to ask.
 | File | What it is |
 |------|------------|
 | `tk_router.py` | **ThreadRouter.** Roster of local + cloud paths; a predicted-utility model over `{completed, format_valid, task_fit, privacy, cost, latency}`; `is_sensitive` privacy gate (→ keep local); a hard spend cap + ledger; and the **approval gate** (`request_paid_approval` / `paid_approved`, one-shot tokens). |
-| `watchfilm.py` | The **`(watch-film …)` skill** — the paid vision workload. Routes through the router, honors spend cap + approval, calls Gemini's video File-API with the agent's own key, logs every gate. Never spends un-approved. |
-| `skills.metta` | The MeTTa skill surface. `(watch-film "path.mp4")` → `watchfilm.watch`. How the agent invokes routed work in her own language. |
+| `adapters/omegaclaw/watchfilm.py` | The **`(watch-film …)` skill** — the paid vision workload. Routes through the router, honors spend cap + approval, calls Gemini's video File-API with the agent's own key, logs every gate. Never spends un-approved. |
+| `adapters/omegaclaw/skills.metta` | The MeTTa skill surface. `(watch-film "path.mp4")` → `watchfilm.watch`. How the agent invokes routed work in her own language. |
 | `router_sample.jsonl` | **Real routing telemetry**, last 400 decisions (`reply_preview` redacted). Includes the live watch-film cycles. |
 | `.env.example` | Environment placeholders. **No keys in this repo.** |
 
@@ -186,8 +216,9 @@ router forages free/local paths and stops at the money boundary to ask.
 
 ## Running it
 
-Runs inside an OmegaClaw agent: `tk_router.py` mounts as the router, `watchfilm.py` as
-`src/watchfilm.py`, and `skills.metta` carries the binding. Set `TK_ROUTER=on` and supply your
+Runs inside an OmegaClaw agent via the adapter (`adapters/omegaclaw/`): `tk_router.py`
+mounts as the router, `watchfilm.py` as `src/watchfilm.py`, and `skills.metta` carries
+the binding. Set `TK_ROUTER=on` and supply your
 own keys via `.env` (see `.env.example`). The agent then calls, in her own MeTTa:
 
 ```
